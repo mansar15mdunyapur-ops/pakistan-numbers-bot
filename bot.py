@@ -4,6 +4,8 @@ import logging
 import json
 import random
 import string
+import re
+import requests
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -17,7 +19,7 @@ BOT_TOKEN = "8772281676:AAHVHo30d95hSpu8tot9OCmHgwNDWMdMQCI"
 ADMIN_IDS = [8178162794]  # Aapka Telegram ID
 ADMIN_USERNAME = "@Muhammad_Ansar"  # Aapka username
 
-# ✅ AAPKE NUMBERS YAHAN ADD KAR DIYE HAIN
+# ✅ AAPKE NUMBERS
 PAYMENT_NUMBERS = {
     'jazzcash': '03017178242',
     'easypaisa': '03424546056'
@@ -79,7 +81,7 @@ class Database:
             self.users[user_id] = {
                 'user_id': user_id,
                 'joined': str(datetime.now()),
-                'coins': 10,  # Daily free coins
+                'coins': 10,
                 'last_reset': str(datetime.now().date()),
                 'numbers': [],
                 'ads_watched': 0,
@@ -94,13 +96,9 @@ class Database:
         self.save_data()
     
     def remove_coins(self, user_id, amount):
-        """Remove coins - Admin ke liye free"""
         user_id = str(user_id)
-        
-        # Admin check
         if int(user_id) in ADMIN_IDS:
             return True
-        
         user = self.get_user(user_id)
         if user['coins'] >= amount:
             user['coins'] -= amount
@@ -109,7 +107,6 @@ class Database:
         return False
     
     def add_payment(self, user_id, plan, amount, transaction_id):
-        """Add payment request"""
         payment_id = f"PAY{len(self.payments)+1}"
         self.payments[payment_id] = {
             'user_id': user_id,
@@ -124,28 +121,21 @@ class Database:
         return payment_id
     
     def approve_payment(self, payment_id, admin_id):
-        """Approve payment and add coins"""
         if payment_id in self.payments:
             payment = self.payments[payment_id]
             if payment['status'] == 'pending':
                 payment['status'] = 'approved'
                 payment['approved_by'] = admin_id
                 payment['approved_time'] = str(datetime.now())
-                
-                # Add coins to user
                 user_id = payment['user_id']
                 self.add_coins(user_id, payment['coins'])
-                
-                # Update user total purchases
                 user = self.get_user(user_id)
                 user['total_purchases'] += 1
-                
                 self.save_data()
                 return True
         return False
     
     def reject_payment(self, payment_id, reason):
-        """Reject payment"""
         if payment_id in self.payments:
             self.payments[payment_id]['status'] = 'rejected'
             self.payments[payment_id]['reject_reason'] = reason
@@ -154,7 +144,6 @@ class Database:
         return False
     
     def get_pending_payments(self):
-        """Get all pending payments"""
         pending = []
         for pid, payment in self.payments.items():
             if payment['status'] == 'pending':
@@ -164,7 +153,6 @@ class Database:
     def add_number(self, user_id, number, service):
         user = self.get_user(user_id)
         order_id = f"ORD{len(self.orders)+1}"
-        
         self.orders[order_id] = {
             'user_id': user_id,
             'number': number,
@@ -173,7 +161,6 @@ class Database:
             'expires': str(datetime.now() + timedelta(minutes=20)),
             'otp': None
         }
-        
         user['numbers'].append(order_id)
         self.save_data()
         return order_id
@@ -192,20 +179,17 @@ class Database:
         today = str(datetime.now().date())
         for user_id in self.users:
             if self.users[user_id].get('last_reset') != today:
-                # Admin ke liye daily reset nahi
                 if int(user_id) not in ADMIN_IDS:
                     self.users[user_id]['coins'] = 10
                     self.users[user_id]['last_reset'] = today
         self.save_data()
     
     def get_stats(self):
-        """Get bot statistics"""
         total_users = len(self.users)
         total_orders = len(self.orders)
         total_coins = sum(u['coins'] for u in self.users.values())
         total_payments = len(self.payments)
         pending_payments = len([p for p in self.payments.values() if p['status'] == 'pending'])
-        
         return {
             'total_users': total_users,
             'total_orders': total_orders,
@@ -216,9 +200,104 @@ class Database:
 
 db = Database()
 
+# ========== REAL OTP DETECTION ==========
+class RealOTPService:
+    """Real OTP detection from free SMS websites"""
+    
+    @staticmethod
+    def clean_number(number):
+        """Clean phone number for websites"""
+        # Remove +92 and any non-digits
+        number = number.replace('+92', '').replace('-', '').replace(' ', '')
+        return number
+    
+    @staticmethod
+    def extract_otp(text):
+        """Extract OTP from text using regex"""
+        
+        # Common OTP patterns
+        patterns = [
+            r'OTP[:\s]*(\d{4,6})',
+            r'code[:\s]*(\d{4,6})',
+            r'verification[:\s]*(\d{4,6})',
+            r'is[:\s]*(\d{4,6})',
+            r'use[:\s]*(\d{4,6})',
+            r'your[:\s]*(\d{4,6})',
+            r'password[:\s]*(\d{4,6})',
+            r'\b\d{4,6}\b'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            if matches:
+                # Filter out phone numbers and common false positives
+                for match in matches:
+                    if len(match) >= 4 and len(match) <= 6:
+                        return match
+        return None
+    
+    @staticmethod
+    def check_otp(number):
+        """Check OTP from multiple free SMS websites"""
+        
+        clean_num = RealOTPService.clean_number(number)
+        
+        # List of free SMS websites for Pakistan numbers
+        sources = [
+            {
+                'url': f"https://receive-sms-online.info/{clean_num}",
+                'name': 'receive-sms-online'
+            },
+            {
+                'url': f"https://sms-receive.net/{clean_num}",
+                'name': 'sms-receive'
+            },
+            {
+                'url': f"https://receive-sms.cc/{clean_num}",
+                'name': 'receive-sms'
+            },
+            {
+                'url': f"https://temp-number.org/{clean_num}",
+                'name': 'temp-number'
+            },
+            {
+                'url': f"https://sms-online.co/receive-sms-{clean_num}",
+                'name': 'sms-online'
+            }
+        ]
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        for source in sources:
+            try:
+                logger.info(f"Checking OTP from {source['name']} for number {clean_num}")
+                
+                response = requests.get(
+                    source['url'], 
+                    headers=headers, 
+                    timeout=5
+                )
+                
+                if response.status_code == 200:
+                    otp = RealOTPService.extract_otp(response.text)
+                    if otp:
+                        logger.info(f"OTP found: {otp} from {source['name']}")
+                        return {
+                            'otp': otp,
+                            'from': source['name'],
+                            'time': datetime.now()
+                        }
+            except Exception as e:
+                logger.error(f"Error checking {source['name']}: {e}")
+                continue
+        
+        return None
+
 # ========== FREE PAKISTAN NUMBERS ==========
 class FreeNumbers:
-    """Free Pakistan numbers from public sources"""
+    """Free Pakistan numbers"""
     
     PAKISTAN_PREFIXES = ['300', '301', '302', '303', '304', '305', '306', '307', '308', '309',
                          '310', '311', '312', '313', '314', '315', '316', '317', '318', '319',
@@ -244,50 +323,29 @@ class FreeNumbers:
                 'source': 'free-source'
             })
         return numbers
-    
-    @staticmethod
-    def check_for_otp(number):
-        if random.random() > 0.7:
-            otp = ''.join(random.choices(string.digits, k=6))
-            return {
-                'otp': otp,
-                'from': 'WhatsApp/Telegram',
-                'time': datetime.now()
-            }
-        return None
 
 # ========== KEYBOARDS ==========
 def get_main_keyboard(user_id=None):
-    """Get main menu keyboard"""
     keyboard = [
         [KeyboardButton("📱 Get Free Number"), KeyboardButton("💰 My Coins")],
         [KeyboardButton("🎥 Watch Ad"), KeyboardButton("💎 Buy Coins")],
         [KeyboardButton("📋 My Numbers"), KeyboardButton("❓ Help")]
     ]
-    
-    # Admin button for admins
     if user_id and user_id in ADMIN_IDS:
         keyboard.append([KeyboardButton("👑 Admin Panel")])
-    
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_services_keyboard():
-    """Get services selection inline keyboard"""
     keyboard = [
-        [
-            InlineKeyboardButton("📱 WhatsApp", callback_data="service_whatsapp"),
-            InlineKeyboardButton("📘 Telegram", callback_data="service_telegram")
-        ],
-        [
-            InlineKeyboardButton("📘 Facebook", callback_data="service_facebook"),
-            InlineKeyboardButton("📸 Instagram", callback_data="service_instagram")
-        ],
+        [InlineKeyboardButton("📱 WhatsApp", callback_data="service_whatsapp"),
+         InlineKeyboardButton("📘 Telegram", callback_data="service_telegram")],
+        [InlineKeyboardButton("📘 Facebook", callback_data="service_facebook"),
+         InlineKeyboardButton("📸 Instagram", callback_data="service_instagram")],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_plans_keyboard():
-    """Get coin purchase plans"""
     keyboard = [
         [InlineKeyboardButton(f"📅 Daily - {COIN_PLANS['daily']['desc']}", callback_data="plan_daily")],
         [InlineKeyboardButton(f"📆 Weekly - {COIN_PLANS['weekly']['desc']}", callback_data="plan_weekly")],
@@ -298,13 +356,9 @@ def get_plans_keyboard():
 
 # ========== BOT HANDLERS ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command handler"""
     user = update.effective_user
     db.get_user(user.id)
-    
-    # Reset daily coins if needed
     db.reset_daily()
-    
     user_data = db.get_user(user.id)
     
     if user.id in ADMIN_IDS:
@@ -317,10 +371,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>Payment Numbers:</b>\n"
             f"JazzCash: <code>{PAYMENT_NUMBERS['jazzcash']}</code>\n"
             f"EasyPaisa: <code>{PAYMENT_NUMBERS['easypaisa']}</code>\n\n"
-            f"<b>Features:</b>\n"
-            f"• Free numbers for all\n"
-            f"• Buy coins via admin\n"
-            f"• Complete admin panel\n\n"
             f"👇 <b>Use buttons below:</b>"
         )
     else:
@@ -332,10 +382,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>Payment Numbers:</b>\n"
             f"JazzCash: <code>{PAYMENT_NUMBERS['jazzcash']}</code>\n"
             f"EasyPaisa: <code>{PAYMENT_NUMBERS['easypaisa']}</code>\n\n"
-            f"<b>How to get numbers:</b>\n"
-            f"1️⃣ Watch ads (free)\n"
-            f"2️⃣ Buy coins (no ads)\n"
-            f"3️⃣ Daily free coins\n\n"
             f"👇 <b>Choose option:</b>"
         )
     
@@ -345,65 +391,49 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML'
     )
 
-# ========== GET NUMBER SECTION ==========
 async def get_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle Get Number button"""
     user_id = update.effective_user.id
     user_data = db.get_user(user_id)
     
-    # Admin check
-    if user_id not in ADMIN_IDS:
-        if user_data['coins'] < 5:
-            await update.message.reply_text(
-                f"❌ <b>Not enough coins!</b>\n\n"
-                f"You have: {user_data['coins']} coins\n"
-                f"Need: 5 coins\n\n"
-                f"Options:\n"
-                f"• 🎥 Watch ads for free coins\n"
-                f"• 💎 Buy coins (no ads)",
-                parse_mode='HTML'
-            )
-            return ConversationHandler.END
+    if user_id not in ADMIN_IDS and user_data['coins'] < 5:
+        await update.message.reply_text(
+            f"❌ <b>Not enough coins!</b>\n\n"
+            f"You have: {user_data['coins']} coins\n"
+            f"Need: 5 coins\n\n"
+            f"🎥 Watch ads or 💎 Buy coins",
+            parse_mode='HTML'
+        )
+        return ConversationHandler.END
     
     await update.message.reply_text(
         "📋 <b>Select Service:</b>",
         reply_markup=get_services_keyboard(),
         parse_mode='HTML'
     )
-    
     return SELECTING_SERVICE
 
 async def service_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle service selection"""
     query = update.callback_query
     await query.answer()
     
     if query.data == "cancel":
         await query.message.delete()
-        await query.message.reply_text("❌ Cancelled")
         return ConversationHandler.END
     
     user_id = query.from_user.id
     service = query.data.replace('service_', '')
     
-    # Deduct coins (admin free)
-    if user_id not in ADMIN_IDS:
-        if not db.remove_coins(user_id, 5):
-            await query.edit_message_text("❌ Not enough coins!")
-            return ConversationHandler.END
+    if user_id not in ADMIN_IDS and not db.remove_coins(user_id, 5):
+        await query.edit_message_text("❌ Not enough coins!")
+        return ConversationHandler.END
     
     await query.edit_message_text("⏳ Finding a free number...")
     
     numbers = FreeNumbers.get_active_numbers(service)
-    
     if not numbers:
         if user_id not in ADMIN_IDS:
             db.add_coins(user_id, 5)
-        await query.edit_message_text(
-            "❌ <b>No numbers available!</b>\n\n"
-            "Please try again later.",
-            parse_mode='HTML'
-        )
+        await query.edit_message_text("❌ No numbers available!", parse_mode='HTML')
         return ConversationHandler.END
     
     number_data = random.choice(numbers)
@@ -423,45 +453,66 @@ async def service_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text(message, parse_mode='HTML')
     
-    # Start OTP checking
+    context.user_data['current_phone'] = phone
+    context.user_data['current_order'] = order_id
+    
+    # ✅ REAL OTP CHECKING - Har 10 seconds
     context.job_queue.run_once(check_otp_job, 10, data={
         'phone': phone,
         'order_id': order_id,
-        'user_id': user_id
+        'user_id': user_id,
+        'attempt': 1
     })
     
     return ConversationHandler.END
 
 async def check_otp_job(context: ContextTypes.DEFAULT_TYPE):
-    """Background job to check OTP"""
+    """Background job to check REAL OTP"""
     job = context.job
     data = job.data
     phone = data['phone']
     order_id = data['order_id']
     user_id = data['user_id']
+    attempt = data.get('attempt', 1)
     
-    otp_data = FreeNumbers.check_for_otp(phone)
+    # Check for REAL OTP
+    otp_data = RealOTPService.check_otp(phone)
     
     if otp_data:
         db.update_otp(order_id, otp_data['otp'])
+        
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"📨 <b>OTP Received!</b>\n\n"
+            text=f"📨 <b>✅ REAL OTP Received!</b>\n\n"
                  f"🔑 <code>{otp_data['otp']}</code>\n"
-                 f"📱 From: {otp_data['from']}\n\n"
+                 f"📱 From: {otp_data['from']}\n"
+                 f"⏱️ Time: {otp_data['time'].strftime('%H:%M:%S')}\n\n"
                  f"✅ Use this code now",
             parse_mode='HTML'
         )
+        
+        logger.info(f"✅ REAL OTP sent to user {user_id}: {otp_data['otp']}")
+        
     else:
         order = db.get_order(order_id)
         if order:
             expiry = datetime.fromisoformat(order['expires'])
-            if datetime.now() < expiry:
-                context.job_queue.run_once(check_otp_job, 10, data=data)
+            if datetime.now() < expiry and attempt < 120:  # Max 120 attempts (20 minutes)
+                # Check again in 10 seconds
+                context.job_queue.run_once(
+                    check_otp_job, 10, 
+                    data={
+                        'phone': phone,
+                        'order_id': order_id,
+                        'user_id': user_id,
+                        'attempt': attempt + 1
+                    }
+                )
+                if attempt % 6 == 0:  # Har 1 minute pe update
+                    logger.info(f"Still checking OTP for {phone} (attempt {attempt})")
 
 # ========== BUY COINS SECTION ==========
 async def buy_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show coin purchase plans"""
     await update.message.reply_text(
         "💎 <b>Buy Coins - No Ads!</b>\n\n"
         "Choose a plan:",
@@ -470,7 +521,6 @@ async def buy_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle plan selection"""
     query = update.callback_query
     await query.answer()
     
@@ -480,7 +530,6 @@ async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     plan = query.data.replace('plan_', '')
     context.user_data['selected_plan'] = plan
-    
     plan_details = COIN_PLANS[plan]
     
     payment_info = (
@@ -491,36 +540,22 @@ async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Send payment to:</b>\n"
         f"JazzCash: <code>{PAYMENT_NUMBERS['jazzcash']}</code>\n"
         f"EasyPaisa: <code>{PAYMENT_NUMBERS['easypaisa']}</code>\n\n"
-        f"<b>After payment:</b>\n"
-        f"1️⃣ Send screenshot\n"
-        f"2️⃣ Send transaction ID\n"
-        f"3️⃣ Admin will approve\n\n"
         f"📞 Contact Admin: {ADMIN_USERNAME}"
     )
     
-    await query.edit_message_text(
-        payment_info,
-        parse_mode='HTML'
-    )
-    
-    # Ask for transaction ID
+    await query.edit_message_text(payment_info, parse_mode='HTML')
     await query.message.reply_text(
         "📤 <b>Send your transaction details:</b>\n"
-        "1. Transaction ID\n"
-        "2. Screenshot (optional)\n\n"
         "Example: <code>TXN123456789</code>",
         parse_mode='HTML'
     )
-    
     return WAITING_PAYMENT_SS
 
 async def handle_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle transaction details"""
     user_id = update.effective_user.id
     text = update.message.text
     plan = context.user_data.get('selected_plan', 'daily')
     
-    # Create payment request
     payment_id = db.add_payment(
         user_id=user_id,
         plan=plan,
@@ -531,12 +566,10 @@ async def handle_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(
         f"✅ <b>Payment request submitted!</b>\n\n"
         f"Payment ID: <code>{payment_id}</code>\n"
-        f"Admin will approve soon.\n"
-        f"⏳ Please wait...",
+        f"Admin will approve soon.",
         parse_mode='HTML'
     )
     
-    # Notify admin
     for admin_id in ADMIN_IDS:
         try:
             admin_msg = (
@@ -548,18 +581,11 @@ async def handle_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"Coins: {COIN_PLANS[plan]['coins']}\n"
                 f"Amount: {COIN_PLANS[plan]['price']} Rs\n"
                 f"Transaction: {text}\n\n"
-                f"Payment to:\n"
-                f"JazzCash: {PAYMENT_NUMBERS['jazzcash']}\n"
-                f"EasyPaisa: {PAYMENT_NUMBERS['easypaisa']}\n\n"
                 f"Commands:\n"
                 f"/approve {payment_id}\n"
                 f"/reject {payment_id} reason"
             )
-            await context.bot.send_message(
-                chat_id=admin_id,
-                text=admin_msg,
-                parse_mode='HTML'
-            )
+            await context.bot.send_message(chat_id=admin_id, text=admin_msg, parse_mode='HTML')
         except:
             pass
     
@@ -567,7 +593,6 @@ async def handle_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ========== ADMIN COMMANDS ==========
 async def approve_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin approve payment"""
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("❌ Unauthorized!")
@@ -578,19 +603,14 @@ async def approve_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     payment_id = context.args[0]
-    
     if db.approve_payment(payment_id, user_id):
         await update.message.reply_text(f"✅ Payment {payment_id} approved!")
-        
-        # Notify user
         payment = db.payments.get(payment_id)
         if payment:
             try:
                 await context.bot.send_message(
                     chat_id=int(payment['user_id']),
-                    text=f"✅ <b>Payment Approved!</b>\n\n"
-                         f"Your coins have been added.\n"
-                         f"Check /mycoins",
+                    text=f"✅ <b>Payment Approved!</b>\n\nYour coins have been added.\nCheck /mycoins",
                     parse_mode='HTML'
                 )
             except:
@@ -599,7 +619,6 @@ async def approve_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Payment not found or already processed!")
 
 async def reject_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin reject payment"""
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("❌ Unauthorized!")
@@ -614,16 +633,12 @@ async def reject_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if db.reject_payment(payment_id, reason):
         await update.message.reply_text(f"❌ Payment {payment_id} rejected!")
-        
-        # Notify user
         payment = db.payments.get(payment_id)
         if payment:
             try:
                 await context.bot.send_message(
                     chat_id=int(payment['user_id']),
-                    text=f"❌ <b>Payment Rejected</b>\n\n"
-                         f"Reason: {reason}\n"
-                         f"Contact admin for details.",
+                    text=f"❌ <b>Payment Rejected</b>\n\nReason: {reason}",
                     parse_mode='HTML'
                 )
             except:
@@ -632,7 +647,6 @@ async def reject_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Payment not found!")
 
 async def add_coins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin add coins to user"""
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("❌ Unauthorized!")
@@ -644,17 +658,13 @@ async def add_coins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     target_id = context.args[0]
     amount = int(context.args[1])
-    
     db.add_coins(target_id, amount)
-    
     await update.message.reply_text(f"✅ Added {amount} coins to user {target_id}")
     
-    # Notify user
     try:
         await context.bot.send_message(
             chat_id=int(target_id),
-            text=f"💰 <b>Coins Added!</b>\n\n"
-                 f"+{amount} coins added to your account!",
+            text=f"💰 <b>Coins Added!</b>\n\n+{amount} coins added!",
             parse_mode='HTML'
         )
     except:
@@ -662,17 +672,10 @@ async def add_coins_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== OTHER HANDLERS ==========
 async def watch_ad(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle Watch Ad button"""
     user_id = update.effective_user.id
-    
     if user_id in ADMIN_IDS:
         user = db.get_user(user_id)
-        await update.message.reply_text(
-            f"👑 <b>Admin</b>\n\n"
-            f"You have unlimited coins!\n"
-            f"Balance: {user['coins']} coins",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text(f"👑 <b>Admin</b>\n\nBalance: {user['coins']} coins", parse_mode='HTML')
         return
     
     ad_text = (
@@ -681,20 +684,12 @@ async def watch_ad(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "[🎬 Watch Ad Now](https://t.me/FreePakistanNumbers)\n\n"
         "⏳ You'll get +5 coins"
     )
-    
     keyboard = [[InlineKeyboardButton("✅ Verified", callback_data="ad_verified")]]
-    
-    await update.message.reply_text(
-        ad_text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
+    await update.message.reply_text(ad_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def ad_verified(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle ad verification"""
     query = update.callback_query
     await query.answer()
-    
     user_id = query.from_user.id
     
     if user_id in ADMIN_IDS:
@@ -703,37 +698,18 @@ async def ad_verified(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     db.add_coins(user_id, 5)
     user = db.get_user(user_id)
-    
-    await query.edit_message_text(
-        f"✅ <b>+5 Coins Added!</b>\n\n"
-        f"New balance: {user['coins']} coins",
-        parse_mode='HTML'
-    )
+    await query.edit_message_text(f"✅ <b>+5 Coins Added!</b>\n\nNew balance: {user['coins']} coins", parse_mode='HTML')
 
 async def my_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user's coins"""
     user_id = update.effective_user.id
     user = db.get_user(user_id)
     
     if user_id in ADMIN_IDS:
-        await update.message.reply_text(
-            f"👑 <b>Admin Coins</b>\n\n"
-            f"💰 Balance: Unlimited\n"
-            f"📊 Numbers used: {len(user['numbers'])}",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text(f"👑 <b>Admin Coins</b>\n\n💰 Balance: Unlimited\n📊 Numbers used: {len(user['numbers'])}", parse_mode='HTML')
     else:
-        await update.message.reply_text(
-            f"💰 <b>Your Coins</b>\n\n"
-            f"Balance: {user['coins']} coins\n"
-            f"Daily free: 10 coins\n"
-            f"Watch ad: +5 coins\n"
-            f"Buy coins: No ads",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text(f"💰 <b>Your Coins</b>\n\nBalance: {user['coins']} coins\nDaily free: 10 coins\nWatch ad: +5 coins", parse_mode='HTML')
 
 async def my_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user's number history"""
     user_id = update.effective_user.id
     user = db.get_user(user_id)
     
@@ -742,11 +718,10 @@ async def my_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     msg = "📋 <b>Your Recent Numbers</b>\n\n"
-    
     for order_id in user['numbers'][-5:]:
         order = db.get_order(order_id)
         if order:
-            otp_status = f"OTP: {order['otp']}" if order['otp'] else "⏳ Waiting..."
+            otp_status = f"✅ OTP: {order['otp']}" if order['otp'] else "⏳ Waiting..."
             msg += f"📞 {order['number']}\n"
             msg += f"   {otp_status}\n"
             msg += f"   {order['time'][:16]}\n\n"
@@ -754,7 +729,6 @@ async def my_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin panel"""
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("❌ Unauthorized!")
@@ -776,21 +750,12 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for pid, pay in pending[:5]:
         admin_text += f"• {pid} - User {pay['user_id']} - {pay['plan']} - {pay['amount']} Rs\n"
     
-    admin_text += f"\n<b>Payment Numbers:</b>\n"
-    admin_text += f"JazzCash: {PAYMENT_NUMBERS['jazzcash']}\n"
-    admin_text += f"EasyPaisa: {PAYMENT_NUMBERS['easypaisa']}\n\n"
-    
-    admin_text += f"<b>Commands:</b>\n"
-    admin_text += f"/approve PAYMENT_ID\n"
-    admin_text += f"/reject PAYMENT_ID reason\n"
-    admin_text += f"/addcoins USER_ID AMOUNT"
+    admin_text += f"\n<b>Commands:</b>\n/approve PAYMENT_ID\n/reject PAYMENT_ID reason\n/addcoins USER_ID AMOUNT"
     
     await update.message.reply_text(admin_text, parse_mode='HTML')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Help command"""
     user_id = update.effective_user.id
-    
     help_text = (
         "❓ <b>How to Use</b>\n\n"
         "1️⃣ <b>Get Number (5 coins):</b>\n"
@@ -803,17 +768,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3️⃣ <b>Buy Coins (No Ads):</b>\n"
         "   • Click 'Buy Coins'\n"
         "   • Select plan\n"
-        "   • Send payment to:\n"
+        "   • Send payment\n"
         f"     JazzCash: {PAYMENT_NUMBERS['jazzcash']}\n"
-        f"     EasyPaisa: {PAYMENT_NUMBERS['easypaisa']}\n"
-        "   • Admin approves\n\n"
+        f"     EasyPaisa: {PAYMENT_NUMBERS['easypaisa']}\n\n"
         f"📞 Contact: {ADMIN_USERNAME}"
     )
-    
     await update.message.reply_text(help_text, reply_markup=get_main_keyboard(user_id), parse_mode='HTML')
 
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all button clicks"""
     text = update.message.text
     user_id = update.effective_user.id
     
@@ -834,11 +796,9 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== MAIN FUNCTION ==========
 def main():
-    print("🚀 Starting Pakistan Numbers Bot...")
+    print("🚀 Starting Pakistan Numbers Bot with REAL OTP...")
     print(f"👑 Admin IDs: {ADMIN_IDS}")
-    print(f"📱 Payment Numbers Added:")
-    print(f"   JazzCash: {PAYMENT_NUMBERS['jazzcash']}")
-    print(f"   EasyPaisa: {PAYMENT_NUMBERS['easypaisa']}")
+    print(f"📱 Payment Numbers: JazzCash: {PAYMENT_NUMBERS['jazzcash']}, EasyPaisa: {PAYMENT_NUMBERS['easypaisa']}")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
@@ -877,9 +837,13 @@ def main():
     app.add_handler(CallbackQueryHandler(plan_selected, pattern='^plan_'))
     
     # Daily reset job
-    app.job_queue.run_daily(lambda _: db.reset_daily(), time=datetime.strptime("00:00", "%H:%M").time())
+    if app.job_queue:
+        app.job_queue.run_daily(lambda _: db.reset_daily(), time=datetime.strptime("00:00", "%H:%M").time())
+        print("✅ Daily reset job scheduled")
+    else:
+        print("⚠️ JobQueue not available")
     
-    print("✅ Bot is running!")
+    print("✅ Bot is running with REAL OTP detection!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
