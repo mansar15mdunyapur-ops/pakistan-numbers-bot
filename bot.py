@@ -17,7 +17,8 @@ from telegram.ext import (
 
 # ========== CONFIGURATION ==========
 BOT_TOKEN = "8772281676:AAHVHo30d95hSpu8tot9OCmHgwNDWMdMQCI"
-ADMIN_IDS = [8178162794]  # Aapka Telegram ID
+ADMIN_IDS = [8178162794]  # Apna Telegram ID
+ADMIN_USERNAME = "@Muhammad_Ansar"
 
 # Payment Numbers
 PAYMENT_NUMBERS = {
@@ -31,6 +32,11 @@ COIN_PLANS = {
     'weekly': {'coins': 350, 'price': 500, 'desc': '350 coins - 500 Rs'},
     'monthly': {'coins': 1600, 'price': 2000, 'desc': '1600 coins - 2000 Rs'}
 }
+
+# ========== OTP API SETTINGS ==========
+OTP_API_URL = "http://147.135.212.197/crapi/st/viewstats"
+OTP_API_TOKEN = "RFdUREJBUzR9T4dVc49ndmFra1NYV5CIhpGVcnaOYmqHhJZXfYGJSQ=="
+OTP_PARAMS = {"token": OTP_API_TOKEN, "records": ""}
 
 # Setup logging
 logging.basicConfig(
@@ -196,98 +202,51 @@ class Database:
 
 db = Database()
 
+# ========== COUNTRY MAP ==========
+country_map = {
+    "92": ("Pakistan", "🇵🇰"),
+    "91": ("India", "🇮🇳"),
+    "1": ("USA", "🇺🇸"),
+    "44": ("UK", "🇬🇧"),
+    "966": ("Saudi Arabia", "🇸🇦"),
+    "971": ("UAE", "🇦🇪"),
+}
+
 # ========== REAL OTP DETECTION ==========
 class RealOTPService:
-    """Real OTP detection from multiple free SMS websites"""
-    
-    @staticmethod
-    def clean_number(number):
-        """Clean phone number for websites"""
-        number = number.replace('+92', '').replace('-', '').replace(' ', '').replace('(', '').replace(')', '')
-        return number
-    
     @staticmethod
     def extract_otp(text):
-        """Extract OTP from text using multiple patterns"""
         patterns = [
-            r'OTP[:\s]*(\d{4,6})',
             r'code[:\s]*(\d{4,6})',
-            r'verification[:\s]*(\d{4,6})',
+            r'OTP[:\s]*(\d{4,6})',
             r'is[:\s]*(\d{4,6})',
-            r'use[:\s]*(\d{4,6})',
-            r'your[:\s]*(\d{4,6})',
-            r'password[:\s]*(\d{4,6})',
-            r'pin[:\s]*(\d{4,6})',
-            r'\b\d{4,6}\b'
+            r'\b(\d{4,6})\b'
         ]
-        
         for pattern in patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            if matches:
-                for match in matches:
-                    if isinstance(match, tuple):
-                        match = match[0]
-                    if match and len(match) >= 4 and len(match) <= 6 and match.isdigit():
-                        return match
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1)
         return None
     
     @staticmethod
-    def check_otp(number):
-        """Check OTP from multiple sources"""
-        clean_num = RealOTPService.clean_number(number)
-        
-        # Browser headers to avoid blocking
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Cache-Control': 'max-age=0'
-        }
-        
-        # Multiple SMS websites
-        sources = [
-            {'url': f"https://receive-sms-online.info/{clean_num}", 'name': 'receive-sms-online'},
-            {'url': f"https://sms-receive.net/{clean_num}", 'name': 'sms-receive'},
-            {'url': f"https://receive-sms.cc/{clean_num}", 'name': 'receive-sms'},
-            {'url': f"https://www.receivesmsonline.net/phone/{clean_num}/", 'name': 'receivesmsonline'},
-            {'url': f"https://www.freeonlinephone.org/{clean_num}", 'name': 'freeonlinephone'},
-        ]
-        
-        for source in sources:
-            try:
-                logger.info(f"🔍 Checking {source['name']} for number {clean_num}")
-                
-                response = requests.get(
-                    source['url'], 
-                    headers=headers, 
-                    timeout=10
-                )
-                
-                if response.status_code == 200:
-                    otp = RealOTPService.extract_otp(response.text)
-                    if otp:
-                        logger.info(f"✅ OTP found: {otp} from {source['name']}")
-                        return {
-                            'otp': otp,
-                            'from': source['name'],
-                            'time': datetime.now()
-                        }
-                
-                # Small delay to avoid rate limiting
-                time.sleep(1)
-                
-            except requests.exceptions.Timeout:
-                logger.warning(f"⏱️ Timeout for {source['name']}")
-            except requests.exceptions.ConnectionError:
-                logger.warning(f"🔌 Connection error for {source['name']}")
-            except Exception as e:
-                logger.error(f"❌ Error with {source['name']}: {e}")
-        
-        logger.info(f"❌ No OTP found for number {clean_num}")
-        return None
+    def fetch_from_api():
+        try:
+            response = requests.get(OTP_API_URL, params=OTP_PARAMS, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, list):
+                    return data
+        except Exception as e:
+            logger.error(f"API error: {e}")
+        return []
+    
+    @staticmethod
+    def get_country(phone):
+        if phone.startswith("+"):
+            for code, (name, flag) in country_map.items():
+                if phone.startswith("+" + code):
+                    return name, flag
+        return "Unknown", "🌍"
 
 # ========== FREE NUMBERS GENERATOR ==========
 class FreeNumbers:
@@ -329,8 +288,6 @@ def get_services_keyboard():
     keyboard = [
         [InlineKeyboardButton("📱 WhatsApp", callback_data="service_whatsapp"),
          InlineKeyboardButton("📘 Telegram", callback_data="service_telegram")],
-        [InlineKeyboardButton("📘 Facebook", callback_data="service_facebook"),
-         InlineKeyboardButton("📸 Instagram", callback_data="service_instagram")],
         [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -353,7 +310,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     welcome_msg = (
         f"👋 <b>Assalam-o-Alaikum {user.first_name}!</b>\n\n"
-        f"📱 <b>🇵🇰 Pakistan Numbers Bot</b>\n\n"
+        f"📱 <b>Pakistan Numbers Bot</b>\n\n"
         f"💰 <b>Your Coins:</b> {user_data['coins']}\n"
         f"🎁 <b>Daily Free:</b> 10 coins\n\n"
         f"<b>Payment Numbers:</b>\n"
@@ -362,28 +319,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👇 <b>Choose option:</b>"
     )
     
-    await update.message.reply_text(
-        welcome_msg,
-        reply_markup=get_main_keyboard(user.id),
-        parse_mode='HTML'
-    )
+    await update.message.reply_text(welcome_msg, reply_markup=get_main_keyboard(user.id), parse_mode='HTML')
 
 async def get_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_data = db.get_user(user_id)
     
     if user_id not in ADMIN_IDS and user_data['coins'] < 5:
-        await update.message.reply_text(
-            f"❌ Not enough coins! You have {user_data['coins']} coins. Need 5.",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text(f"❌ Not enough coins! You have {user_data['coins']} coins. Need 5.")
         return ConversationHandler.END
     
-    await update.message.reply_text(
-        "📋 <b>Select Service:</b>",
-        reply_markup=get_services_keyboard(),
-        parse_mode='HTML'
-    )
+    await update.message.reply_text("📋 <b>Select Service:</b>", reply_markup=get_services_keyboard(), parse_mode='HTML')
     return SELECTING_SERVICE
 
 async def service_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -417,50 +363,62 @@ async def service_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['current_phone'] = phone
     context.user_data['current_order'] = order_id
     
-    # Start OTP checking
-    context.job_queue.run_once(check_otp_job, 10, data={
-        'phone': phone,
-        'order_id': order_id,
-        'user_id': user_id,
-        'attempt': 1
-    })
-    
     return ConversationHandler.END
 
-async def check_otp_job(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    data = job.data
-    phone = data['phone']
-    order_id = data['order_id']
-    user_id = data['user_id']
-    attempt = data.get('attempt', 1)
+# ========== OTP CHECKER BACKGROUND JOB ==========
+async def otp_checker(context: ContextTypes.DEFAULT_TYPE):
+    """Background job to check OTPs from API"""
+    logger.info("🔍 Checking for new OTPs...")
     
-    logger.info(f"🔄 Checking OTP for {phone} (attempt {attempt})")
+    entries = RealOTPService.fetch_from_api()
     
-    otp_data = RealOTPService.check_otp(phone)
+    if not entries:
+        return
     
-    if otp_data:
-        db.update_otp(order_id, otp_data['otp'])
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"📨 <b>✅ REAL OTP Received!</b>\n\n🔑 <code>{otp_data['otp']}</code>\n📱 From: {otp_data['from']}",
-            parse_mode='HTML'
-        )
-        logger.info(f"✅ OTP sent to user {user_id}: {otp_data['otp']}")
-    else:
-        order = db.get_order(order_id)
-        if order and datetime.now() < datetime.fromisoformat(order['expires']) and attempt < 40:
-            context.job_queue.run_once(
-                check_otp_job, 15, 
-                data={'phone': phone, 'order_id': order_id, 'user_id': user_id, 'attempt': attempt + 1}
-            )
+    for entry in entries:
+        try:
+            if len(entry) < 4:
+                continue
+            
+            app = entry[0]
+            phone = entry[1]
+            message = entry[2]
+            timestamp = entry[3]
+            
+            # Check if this number is in our database
+            for user_id, user in db.users.items():
+                for order_id in user['numbers'][-10:]:  # Last 10 numbers
+                    order = db.get_order(order_id)
+                    if order and order['number'] == phone and not order['otp']:
+                        # Extract OTP
+                        otp = RealOTPService.extract_otp(message)
+                        if otp:
+                            db.update_otp(order_id, otp)
+                            
+                            # Get country
+                            country, flag = RealOTPService.get_country(phone)
+                            
+                            # Notify user
+                            try:
+                                await context.bot.send_message(
+                                    chat_id=int(user_id),
+                                    text=f"📨 <b>✅ OTP Received!</b>\n\n"
+                                         f"🔑 <code>{otp}</code>\n"
+                                         f"📱 Number: <code>{phone}</code>\n"
+                                         f"🌍 {country} {flag}\n"
+                                         f"📱 Service: {app}\n\n"
+                                         f"✅ Use this code now!",
+                                    parse_mode='HTML'
+                                )
+                                logger.info(f"✅ OTP sent to user {user_id}: {otp}")
+                            except:
+                                pass
+        except Exception as e:
+            logger.error(f"Error processing OTP: {e}")
 
+# ========== BUY COINS SECTION ==========
 async def buy_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "💎 <b>Buy Coins</b>\n\nChoose plan:",
-        reply_markup=get_plans_keyboard(),
-        parse_mode='HTML'
-    )
+    await update.message.reply_text("💎 <b>Buy Coins</b>\n\nChoose plan:", reply_markup=get_plans_keyboard(), parse_mode='HTML')
 
 async def plan_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -548,10 +506,7 @@ async def watch_ad(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     keyboard = [[InlineKeyboardButton("✅ Verified", callback_data="ad_verified")]]
-    await update.message.reply_text(
-        "🎥 Watch Ad\n\nAfter watching, click verify:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text("🎥 Watch Ad\n\nAfter watching, click verify:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def ad_verified(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -648,6 +603,11 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_buttons))
     app.add_handler(CallbackQueryHandler(ad_verified, pattern='^ad_verified$'))
     app.add_handler(CallbackQueryHandler(plan_selected, pattern='^plan_'))
+    
+    # OTP Checker job - har 30 seconds
+    if app.job_queue:
+        app.job_queue.run_repeating(otp_checker, interval=30, first=10)
+        print("✅ OTP checker job scheduled (every 30 seconds)")
     
     # Daily reset job
     if app.job_queue:
